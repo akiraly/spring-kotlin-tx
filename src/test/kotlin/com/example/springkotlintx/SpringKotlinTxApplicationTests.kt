@@ -84,7 +84,7 @@ class SpringTxContext(
     companion object Key : CoroutineContext.Key<SpringTxContext>
 
     override fun restoreThreadContext(context: CoroutineContext, oldState: SpringTxState) {
-        oldState.applyOnCurrentThread()
+        require(state == oldState.applyOnCurrentThread())
     }
 
     override fun updateThreadContext(context: CoroutineContext): SpringTxState =
@@ -96,10 +96,23 @@ data class SpringTxState(
     val currentTransactionReadOnly: Boolean = TSM.isCurrentTransactionReadOnly(),
     val currentTransactionIsolationLevel: Int? = TSM.getCurrentTransactionIsolationLevel(),
     val currentTransactionName: String? = TSM.getCurrentTransactionName(),
-    val resourceMap: Map<Any, Any> = TSM.getResourceMap(),
+    val resourceMap: Map<Any, Any> = TSM.getResourceMap().toMap(), // need to copy the Map!
     val synchronizationActive: Boolean = TSM.isSynchronizationActive(),
     val synchronizations: List<TransactionSynchronization>? = if (synchronizationActive) TSM.getSynchronizations() else null
 ) {
+    init {
+        if (synchronizationActive) require(synchronizations != null)
+        else require(synchronizations == null)
+    }
+
+    fun isEmpty(): Boolean = !isTransactionActive
+            && !currentTransactionReadOnly
+            && currentTransactionIsolationLevel == null
+            && currentTransactionName == null
+            && resourceMap.isEmpty()
+            && !synchronizationActive
+            && synchronizations == null
+
     fun applyOnCurrentThread(): SpringTxState {
         val oldState = SpringTxState()
         TSM.clear()
@@ -118,6 +131,8 @@ data class SpringTxState(
         } else {
             require(synchronizations == null)
         }
+
+        require(this == SpringTxState())
 
         return oldState
     }
