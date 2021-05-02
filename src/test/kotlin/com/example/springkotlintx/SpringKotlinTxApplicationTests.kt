@@ -13,6 +13,9 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager
 import org.springframework.transaction.support.TransactionSynchronization
 import org.springframework.transaction.support.TransactionSynchronizationManager
 import org.springframework.transaction.support.TransactionTemplate
+import reactor.core.publisher.Mono
+import reactor.core.scheduler.Schedulers
+import java.time.Duration
 import kotlin.coroutines.AbstractCoroutineContextElement
 import kotlin.coroutines.CoroutineContext
 
@@ -21,7 +24,7 @@ typealias TSM = TransactionSynchronizationManager
 class SpringKotlinTxApplicationTests {
 
     @Test
-    fun test() {
+    fun testCoroutine() {
 
         HikariDataSource().use { ds ->
             ds.jdbcUrl = "jdbc:h2:mem:"
@@ -72,6 +75,61 @@ class SpringKotlinTxApplicationTests {
                 }
             }
         }
+    }
+
+    @Test
+    fun testReactor() {
+        Schedulers.onScheduleHook("spring-tx") { r ->
+            val state = SpringTxState()
+
+            if (state.isEmpty()) return@onScheduleHook r
+
+            Runnable {
+                val oldState = state.applyOnCurrentThread()
+                try {
+                    r.run()
+                } finally {
+                    assertThat(oldState.applyOnCurrentThread()).isEqualTo(state)
+                }
+            }
+        }
+
+        HikariDataSource().use { ds ->
+            ds.jdbcUrl = "jdbc:h2:mem:"
+
+            val txManager = DataSourceTransactionManager(ds)
+            val txTpl = TransactionTemplate(txManager)
+
+            assertThat(inTx()).isFalse
+            txTpl.execute {
+                val tx = SpringTxState()
+
+                assertThat(inTx()).isTrue
+
+                Mono.defer {
+                    assertThat(inTx()).isTrue
+                    assertThat(SpringTxState()).isEqualTo(tx)
+                    Mono.just(5)
+                }
+                    .publishOn(Schedulers.boundedElastic())
+                    .doOnNext {
+                        assertThat(inTx()).isTrue
+                        assertThat(SpringTxState()).isEqualTo(tx)
+                    }
+                    .publishOn(Schedulers.parallel())
+                    .doOnNext {
+                        assertThat(inTx()).isTrue
+                        assertThat(SpringTxState()).isEqualTo(tx)
+                    }
+                    .publishOn(Schedulers.boundedElastic())
+                    .doOnNext {
+                        assertThat(inTx()).isTrue
+                        assertThat(SpringTxState()).isEqualTo(tx)
+                    }.block(Duration.ofMillis(100))
+            }
+        }
+
+        Schedulers.resetOnScheduleHook("spring-tx")
     }
 
     private fun inTx() = TSM.isActualTransactionActive()
